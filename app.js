@@ -556,7 +556,7 @@ async function vMenu() {
       <div class="muted" style="margin-top:4px">${persisted ? '✓ ブラウザに永続保存を許可されています' : '※ ブラウザの判断でデータが消える可能性があります。こまめにバックアップしてください。'}</div>
       <button class="btn danger wide" style="margin-top:14px" id="wipe">すべてのデータを削除</button>
     </div>
-    <p class="muted" style="text-align:center">公共施設 劣化調査ノート v1.2</p>`;
+    <p class="muted" style="text-align:center">公共施設 劣化調査ノート v1.3</p>`;
   const saveP = debounce(async () => {
     await DB.put('kv', { city: $('#pCity').value.trim(), title: $('#pTitle').value.trim(), surveyor: $('#pSur').value.trim() }, 'project');
   }, 300);
@@ -574,16 +574,26 @@ async function vMenu() {
 }
 
 /* ------------------------------------------------------- file save */
-async function saveFile(blob, filename) {
+/* 時間のかかる出力の後は、iPhoneの「ユーザー操作の直後でないと共有できない」制約にかからないよう、
+   いったんダイアログを出して、ボタンを押してもらってから共有シートを開く */
+function saveFile(blob, filename) {
   const file = new File([blob], filename, { type: blob.type });
+  const canShare = navigator.canShare && navigator.canShare({ files: [file] });
   const mobile = /iPhone|iPad|Android/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
-  if (mobile && navigator.canShare && navigator.canShare({ files: [file] })) {
-    try { await navigator.share({ files: [file], title: filename }); return; }
-    catch (e) { if (e.name === 'AbortError') return; }
-  }
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename;
-  document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+  const download = () => {
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  };
+  if (!(mobile && canShare)) { download(); return; }
+  const dlg = $('#dlg');
+  $('#dlgName').textContent = `${filename}（${(blob.size / 1048576).toFixed(1)} MB）`;
+  $('#dlgShare').onclick = async () => {
+    try { await navigator.share({ files: [file] }); dlg.close(); toast('保存・共有しました'); }
+    catch (e) { if (e.name !== 'AbortError') { console.warn(e); toast('共有できませんでした：' + e.message, 5000); } }
+  };
+  $('#dlgClose').onclick = () => dlg.close();
+  dlg.showModal();
 }
 function stamp() { const d = new Date(); return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`; }
 function safeName(s) { return String(s || '').replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 40); }
@@ -598,11 +608,12 @@ async function exportExcel(facilityIds) {
     if (!facs.length) return toast('出力する建物がありません');
     const items = [];
     for (const f of facs) items.push({ f, recs: sortRecords(await DB.byFacility(f.id)) });
-    const blob = await window.buildSurveyWorkbook(pj, items);
+    const total = items.reduce((a, x) => a + x.recs.length, 0);
+    const blob = await window.buildSurveyWorkbook(pj, items, n => toast(`Excelを作成中… 写真 ${n} / ${total}`, 180000));
     const label = facs.length === 1 ? `${facs[0].no || ''}${facLabel(facs[0])}` : (pj.city || '全件');
-    await saveFile(blob, `劣化度調査_${safeName(label)}_${stamp()}.xlsx`);
+    saveFile(blob, `劣化度調査_${safeName(label)}_${stamp()}.xlsx`);
     const noPart = items.reduce((a, x) => a + x.recs.filter(r => !r.part).length, 0);
-    toast(noPart ? `出力しました。部位（区分）が未設定の写真が ${noPart} 枚あり、調査票の劣化状況には載っていません。` : 'Excelを出力しました', noPart ? 6000 : 2200);
+    toast(noPart ? `部位（区分）が未設定の写真が ${noPart} 枚あり、調査票の劣化状況には載っていません。` : 'Excelの準備ができました', noPart ? 6000 : 2200);
   } catch (e) { console.error(e); toast('Excel出力に失敗しました：' + e.message, 6000); }
 }
 
@@ -615,8 +626,8 @@ async function exportBackup() {
     const records = [];
     for (const r of await DB.all('records')) records.push(Object.assign({}, r, { photo: await blobToDataURL(r.photo), thumb: await blobToDataURL(r.thumb) }));
     const blob = new Blob([JSON.stringify({ app: 'rekka-survey', version: 2, exportedAt: Date.now(), project: pj, facilities, records })], { type: 'application/json' });
-    await saveFile(blob, `劣化調査バックアップ_${safeName(pj.city || '')}_${stamp()}.json`);
-    toast('書き出しました');
+    toast('書き出しの準備ができました');
+    saveFile(blob, `劣化調査バックアップ_${safeName(pj.city || '')}_${stamp()}.json`);
   } catch (e) { console.error(e); toast('書き出しに失敗しました：' + e.message, 6000); }
 }
 $('#bkInput').onchange = async e => {

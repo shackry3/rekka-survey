@@ -103,7 +103,7 @@
   }
 
   /* ============================ 劣化状況写真 ============================ */
-  async function sheetPhoto(ws, wb, f, recs) {
+  async function sheetPhoto(ws, wb, f, recs, tick) {
     const FONT = 'ＭＳ Ｐ明朝';
     const W = [0.75, 0.375, 54.625, 0.375, 1.625, 9, 27.625, 0.75];
     W.forEach((w, i) => ws.getColumn(i + 1).width = w);
@@ -147,7 +147,8 @@
         const offX = Math.round((colPx(W[2]) - w) / 2);
         let yPt = (BH.reduce((a, b) => a + b, 0) - h / PX_PER_PT) / 2, k2 = 0;
         while (k2 < 17 && yPt >= BH[k2]) { yPt -= BH[k2]; k2++; }
-        const imgId = wb.addImage({ base64: await blobToDataURL(r.photo), extension: 'jpeg' });
+        if (tick) tick();
+        const imgId = wb.addImage({ buffer: new Uint8Array(await r.photo.arrayBuffer()), extension: 'jpeg' });
         ws.addImage(imgId, {
           tl: { nativeCol: 2, nativeColOff: offX * 9525, nativeRow: t - 1 + k2, nativeRowOff: Math.round(yPt * 12700) },
           ext: { width: w, height: h }, editAs: 'oneCell'
@@ -222,7 +223,8 @@
     ws.pageSetup = { paperSize: 9, orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, printTitlesRow: '1:1' };
   }
 
-  window.buildSurveyWorkbook = async function (pj, items) {
+  window.buildSurveyWorkbook = async function (pj, items, onProgress) {
+    let done = 0; const tick = () => { done++; if (onProgress && done % 5 === 0) onProgress(done); };
     const wb = new ExcelJS.Workbook();
     wb.creator = pj.surveyor || ''; wb.created = new Date();
     const used = new Set(), single = items.length === 1;
@@ -230,10 +232,11 @@
     for (const { f, recs } of items) {
       const pre = single ? '' : `${f.no ? f.no + '_' : ''}${facLabel(f).replace(/\s+/g, '')}`.slice(0, 22) + '_';
       sheetChosa(wb.addWorksheet(sheetName(pre + (single ? '劣化度調査票' : '調査票'), used)), f, recs, pj);
-      await sheetPhoto(wb.addWorksheet(sheetName(pre + (single ? '劣化状況写真' : '写真'), used)), wb, f, recs);
+      await sheetPhoto(wb.addWorksheet(sheetName(pre + (single ? '劣化状況写真' : '写真'), used)), wb, f, recs, tick);
       sheetBF(wb.addWorksheet(sheetName(pre + (single ? 'バリアフリー状況' : 'BF'), used)), f, pj);
     }
-    const buf = await wb.xlsx.writeBuffer();
+    // JPEGは圧縮済みなので再圧縮しない（STORE）。iPhoneでの出力時間を大きく短縮する
+    const buf = await wb.xlsx.writeBuffer({ zip: { compression: 'STORE' } });
     return new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   };
 })();

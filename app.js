@@ -112,11 +112,53 @@ function drawScaled(src, max, q) {
 }
 async function processImage(file) {
   const bmp = await loadBitmap(file);
-  const main = await drawScaled(bmp, 1600, 0.82);
+  const main = await drawScaled(bmp, CFG.image.maxPx, CFG.image.quality);
   const th = await drawScaled(bmp, 360, 0.7);
   if (bmp.close) bmp.close();
   return { photo: main.blob, thumb: th.blob, w: main.w, h: main.h };
 }
+
+/* 写真ライブラリから取り込んだJPEGの撮影日時（EXIF DateTimeOriginal）を読む */
+async function exifDate(file) {
+  try {
+    const v = new DataView(await file.slice(0, 196608).arrayBuffer());
+    if (v.getUint16(0) !== 0xFFD8) return null;
+    let o = 2;
+    while (o < v.byteLength - 4) {
+      const mk = v.getUint16(o), len = v.getUint16(o + 2);
+      if (mk === 0xFFE1 && v.getUint32(o + 4) === 0x45786966) {
+        const t = o + 10, le = v.getUint16(t) === 0x4949;
+        const u16 = x => v.getUint16(t + x, le), u32 = x => v.getUint32(t + x, le);
+        const find = (ifd, tag) => { const n = u16(ifd); for (let i = 0; i < n; i++) { const e = ifd + 2 + i * 12; if (u16(e) === tag) return e; } return null; };
+        const ex = find(u32(4), 0x8769); if (ex === null) return null;
+        const d = find(u32(ex + 8), 0x9003); if (d === null) return null;
+        const off = u32(d + 8); let str = '';
+        for (let i = 0; i < 19; i++) str += String.fromCharCode(v.getUint8(t + off + i));
+        const m = str.match(/(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})/);
+        return m ? new Date(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime() : null;
+      }
+      if ((mk & 0xFF00) !== 0xFF00) break;
+      o += 2 + len;
+    }
+  } catch (e) { }
+  return null;
+}
+
+/* 本体（写真アプリ）への保存：Webアプリからは自動保存できないため、共有シート→「画像を保存」を使う */
+const originals = new Map();      // 撮影直後の元画像（このセッション中だけ保持）
+async function getSettings() { return Object.assign({ saveToDevice: true }, await DB.get('kv', 'settings')); }
+async function shareImages(files) {
+  if (navigator.canShare && navigator.canShare({ files })) {
+    try { await navigator.share({ files }); return true; }
+    catch (e) { if (e.name === 'AbortError') return false; console.warn(e); }
+  }
+  for (const f of files) {                       // 共有できない環境（PCなど）はダウンロード
+    const a = document.createElement('a'); a.href = URL.createObjectURL(f); a.download = f.name;
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+  }
+  return true;
+}
+function photoFileName(f, n, ext = 'jpg') { return `${f.no ? f.no + '_' : ''}${facLabel(f).replace(/[\\/:*?"<>|\s]+/g, '')}_写真${n}.${ext}`; }
 
 /* ------------------------------------------------------------- router */
 const backBtn = $('#backBtn'), titleEl = $('#title'), fab = $('#fab'), fabInner = $('#fabInner');
@@ -257,6 +299,7 @@ async function vFacility(id) {
         <button class="btn ghost sm" onclick="go('#/bf/${enc(id)}')">バリアフリー${bfDone ? ' ✓' : ''}</button>
         <button class="btn ghost sm" id="xlsOne">Excel出力</button>
       </div>
+      ${recs.length ? `<button class="btn ghost sm wide" id="saveAll" style="margin-top:8px">📥 この建物の写真をまとめて本体に保存（${recs.length}枚）</button>` : ''}
     </div>
     ${recs.length ? `<div class="grid">${recs.map((r, i) => {
       const nl = photoNoteLines(r);
@@ -271,6 +314,12 @@ async function vFacility(id) {
     }).join('')}</div>`
       : `<div class="empty">まだ写真がありません。<br>下の「撮影して記録」で撮影してください。<br>1枚目は建物の全景がおすすめです。</div>`}`;
   $('#xlsOne').onclick = () => exportExcel([id]);
+  if (recs.length) $('#saveAll').onclick = async () => {
+    toast('準備中…', 30000);
+    const files = recs.map((r, i) => new File([r.photo], photoFileName(f, i + 1), { type: 'image/jpeg' }));
+    toast('共有シートで「画像を保存」を選んでください', 3000);
+    await shareImages(files);
+  };
 }
 
 /* ------------------------------------------------------- capture */
@@ -285,6 +334,7 @@ async function addPhotos(files, fromCamera) {
   const fid = currentFacility;
   const existing = await DB.byFacility(fid);
   const last = (await DB.get('kv', 'last_' + fid)) || {};
+  const st = await getSettings();
   toast(files.length > 1 ? `${files.length} 枚を取り込み中…` : '写真を保存中…', 60000);
   let firstId = null;
   try {
@@ -295,11 +345,12 @@ async function addPhotos(files, fromCamera) {
         id: uid('r_'), facilityId: fid,
         floor: first ? '' : (last.floor || ''), part: first ? '全景' : (fromCamera ? (last.part || '') : ''),
         detail: '', phenomena: [], memo: '',
-        takenAt: fromCamera ? Date.now() : (file.lastModified || Date.now()),
+        takenAt: fromCamera ? Date.now() : ((await exifDate(file)) || file.lastModified || Date.now()),
         createdAt: Date.now(), updatedAt: Date.now(),
         photo: img.photo, thumb: img.thumb, w: img.w, h: img.h
       };
       await DB.put('records', rec);
+      if (fromCamera && st.saveToDevice) originals.set(rec.id, file);
       firstId = firstId || rec.id;
     }
     requestPersist();
@@ -329,7 +380,12 @@ async function vRecord(id) {
   });
   const chip = (val, on) => `<button class="chip ${on ? 'on' : ''}" data-v="${esc(val)}">${esc(val)}</button>`;
   const { charsPerLine: N, lines: L } = CFG.photoNote;
+  const orig = originals.get(id);
   view.innerHTML = `
+    ${orig ? `<div class="card" id="saveBanner" style="background:#fff6ec;border-color:#e8c9a6;display:flex;align-items:center;gap:10px;padding:10px 12px">
+      <span style="flex:1;font-size:14px">この写真（元の画質）を本体の写真アプリにも保存しますか？</span>
+      <button class="btn acc" id="saveOrig" style="padding:11px 14px;font-size:15px">📥 保存</button>
+      <button class="btn ghost" id="skipOrig" style="padding:11px 12px;font-size:14px">しない</button></div>` : ''}
     <img class="photo-main" src="${blobURL(r.photo)}" alt="">
     <div class="muted" style="margin:6px 2px 12px;display:flex;justify-content:space-between">
       <span>撮影：${fmtDate(r.takenAt)}</span><span>${idx + 1} / ${recs.length}</span>
@@ -356,7 +412,23 @@ async function vRecord(id) {
       </div>
       <div class="hint">改行ごとに段落になります。キーボードのマイクボタンで音声入力もできます。入力は自動保存されます。</div>
     </div>
-    <button class="btn danger wide" id="delR" style="margin-top:16px">この写真を削除</button>`;
+    <button class="btn ghost wide" id="saveDev" style="margin-top:16px">📥 この写真を本体に保存</button>
+    <button class="btn danger wide" id="delR" style="margin-top:10px">この写真を削除</button>`;
+
+  const n = idx + 1;
+  if (orig) {
+    $('#saveOrig').onclick = async () => {
+      const ext = (orig.type || '').includes('png') ? 'png' : (orig.type || '').includes('heic') ? 'heic' : 'jpg';
+      const ok = await shareImages([new File([orig], photoFileName(f, n, ext), { type: orig.type || 'image/jpeg' })]);
+      if (ok) { originals.delete(id); $('#saveBanner').remove(); toast('共有シートで「画像を保存」を選ぶと写真アプリに保存されます', 3500); }
+    };
+    $('#skipOrig').onclick = () => { originals.delete(id); $('#saveBanner').remove(); };
+  }
+  $('#saveDev').onclick = async () => {
+    const src = originals.get(id) || r.photo;
+    await shareImages([new File([src], photoFileName(f, n), { type: 'image/jpeg' })]);
+    originals.delete(id); const b = $('#saveBanner'); if (b) b.remove();
+  };
 
   const counter = () => {
     const nl = photoNoteLines({ memo: $('#memo').value, phenomena: r.phenomena, part: r.part });
@@ -441,6 +513,7 @@ async function vMenu() {
   let usage = '';
   try { const e = await navigator.storage.estimate(); usage = `使用容量 約 ${(e.usage / 1048576).toFixed(0)} MB`; } catch (e) { }
   let persisted = false; try { persisted = await navigator.storage.persisted(); } catch (e) { }
+  const st = await getSettings();
   setChrome({ title: '出力・設定', back: '#/' });
   view.innerHTML = `
     <div class="card">
@@ -450,6 +523,14 @@ async function vMenu() {
       <label class="f">調査名</label><input type="text" id="pTitle" value="${esc(pj.title)}" placeholder="例：公共施設 劣化状況調査">
       <label class="f">記入者</label><input type="text" id="pSur" value="${esc(pj.surveyor)}" placeholder="例：山田、宮川">
       <div class="hint">劣化度調査票の「記入者」欄に入ります。</div>
+    </div>
+    <div class="card">
+      <h2>撮影の設定</h2>
+      <label style="display:flex;align-items:center;gap:10px;font-size:15px">
+        <input type="checkbox" id="sDev" ${st.saveToDevice ? 'checked' : ''} style="width:22px;height:22px">
+        撮影後に「本体の写真アプリにも保存」ボタンを表示する
+      </label>
+      <div class="hint">Webアプリは写真アプリへ自動保存できないため、撮影直後の画面のボタン →「画像を保存」で、元の画質のまま本体に残せます。アプリ内とExcelには、印刷に十分な長辺${CFG.image.maxPx}pxに圧縮して保存します。</div>
     </div>
     <div class="card">
       <h2>Excel出力</h2>
@@ -475,11 +556,12 @@ async function vMenu() {
       <div class="muted" style="margin-top:4px">${persisted ? '✓ ブラウザに永続保存を許可されています' : '※ ブラウザの判断でデータが消える可能性があります。こまめにバックアップしてください。'}</div>
       <button class="btn danger wide" style="margin-top:14px" id="wipe">すべてのデータを削除</button>
     </div>
-    <p class="muted" style="text-align:center">公共施設 劣化調査ノート v1.1</p>`;
+    <p class="muted" style="text-align:center">公共施設 劣化調査ノート v1.2</p>`;
   const saveP = debounce(async () => {
     await DB.put('kv', { city: $('#pCity').value.trim(), title: $('#pTitle').value.trim(), surveyor: $('#pSur').value.trim() }, 'project');
   }, 300);
   ['#pCity', '#pTitle', '#pSur'].forEach(s => $(s).oninput = saveP);
+  $('#sDev').onchange = async () => { await DB.put('kv', Object.assign(st, { saveToDevice: $('#sDev').checked }), 'settings'); };
   $('#xlsAll').onclick = () => exportExcel(null);
   $('#bkOut').onclick = exportBackup;
   $('#bkIn').onclick = () => { $('#bkInput').value = ''; $('#bkInput').click(); };

@@ -119,8 +119,7 @@
         const i = p * 3 + j, t = R0 + 1 + j * 20;
         BH.forEach((h, k) => ws.getRow(t + k).height = h);
         ws.getRow(t + 18).height = 15.95; ws.getRow(t + 19).height = 15.95;
-        if (i >= recs.length) continue;
-        const r = recs[i];
+        const r = recs[i] || null;            // 写真がない欄も枠と項目名は残す
         // 枠線：写真枠（B〜D）と項目表（F〜G）
         for (let k = 0; k < 18; k++) {
           const top = k === 0 ? T : undefined, bottom = k === 17 ? T : undefined;
@@ -133,12 +132,12 @@
         }
         const label = (k, s) => { const c = ws.getCell(t + k, 6); c.value = s; c.font = font; c.alignment = { horizontal: 'center', vertical: 'middle' }; };
         const val = (k, v, o = {}) => { const c = ws.getCell(t + k, 7); c.value = v; c.font = font; c.alignment = Object.assign({ vertical: 'middle', horizontal: 'left', indent: 0 }, o); return c; };
-        label(1, '写真　№'); val(1, i + 1, { horizontal: 'center' });
-        label(2, '撮影日'); val(2, ymd(r.takenAt), { horizontal: 'center' }).numFmt = 'yyyy/m/d';
-        if (r.part !== '全景' || r.floor || r.detail) {
-          label(4, '階'); val(4, r.floor || '');
-          label(5, '部位'); val(5, r.detail || (r.part === '全景' ? '' : r.part || ''), { shrinkToFit: true });
-        }
+        label(1, '写真　№'); label(2, '撮影日'); label(4, '階'); label(5, '部位');
+        if (!r) continue;
+        val(1, i + 1, { horizontal: 'center' });
+        val(2, ymd(r.takenAt), { horizontal: 'center' }).numFmt = 'yyyy/m/d';
+        val(4, r.floor || '');
+        val(5, r.detail || (r.part === '全景' ? '' : r.part || ''), { shrinkToFit: true });
         const nl = photoNoteLines(r).lines;
         const lines = nl.length > NL ? [...nl.slice(0, NL - 1), nl.slice(NL - 1).join('')] : nl;
         lines.forEach((s, k) => val(LINES0 + k, s, { shrinkToFit: k === NL - 1 && nl.length > NL }));

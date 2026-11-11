@@ -1,0 +1,5 @@
+# 公開不要なファイル（テスト出力・調査データのバックアップ等）
+*.xlsx
+*.json
+!manifest.webmanifest
+.DS_Store

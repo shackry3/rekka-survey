@@ -8,7 +8,7 @@
   const FILL_HEAD = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD0DFE6' } };    // 表頭
   const FILL_GRAY = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F2F2' } };
   const PX_PER_PT = 96 / 72;
-  const colPx = w => Math.floor(w * 7 + 5);       // 列幅（文字数）→ ピクセル概算
+  const colPx = w => Math.floor(w * 8 + 5);       // 列幅（文字数）→ ピクセル（標準フォント 游ゴシック11pt の数字幅 8px）
 
   const ymd = t => { const d = new Date(t); return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())); };
   const isNum = s => /^[\d.,]+$/.test(String(s || '').trim());
@@ -141,18 +141,24 @@
         const nl = photoNoteLines(r).lines;
         const lines = nl.length > NL ? [...nl.slice(0, NL - 1), nl.slice(NL - 1).join('')] : nl;
         lines.forEach((s, k) => val(LINES0 + k, s, { shrinkToFit: k === NL - 1 && nl.length > NL }));
-        // 写真：枠内に縦横比を保って中央配置（位置はEMUで指定）
-        const fw = colPx(W[2]) - 8, fh = (BH.slice(1, 17).reduce((a, b) => a + b, 0)) * PX_PER_PT - 8;
-        const s = Math.min(fw / r.w, fh / r.h), w = Math.round(r.w * s), h = Math.round(r.h * s);
-        const offX = Math.round((colPx(W[2]) - w) / 2);
-        let yPt = (BH.reduce((a, b) => a + b, 0) - h / PX_PER_PT) / 2, k2 = 0;
-        while (k2 < 17 && yPt >= BH[k2]) { yPt -= BH[k2]; k2++; }
+        // 写真：C列の幅いっぱいに配置（縦長などで枠の高さを超える場合は高さに合わせて中央配置）
+        const cw = colPx(W[2]);                                   // C列の幅（px）
+        const blockPx = BH.reduce((a, b) => a + b, 0) * PX_PER_PT;  // 枠の高さ（px）
         if (tick) tick();
         const imgId = wb.addImage({ buffer: new Uint8Array(await r.photo.arrayBuffer()), extension: 'jpeg' });
-        ws.addImage(imgId, {
-          tl: { nativeCol: 2, nativeColOff: offX * 9525, nativeRow: t - 1 + k2, nativeRowOff: Math.round(yPt * 12700) },
-          ext: { width: w, height: h }, editAs: 'oneCell'
-        });
+        let w = cw, h = Math.round(cw * r.h / r.w);
+        if (h > blockPx - 4) { h = Math.round(blockPx - 4); w = Math.round(h * r.w / r.h); }
+        let yPt = (BH.reduce((a, b) => a + b, 0) - h / PX_PER_PT) / 2, k2 = 0;
+        while (k2 < 17 && yPt >= BH[k2]) { yPt -= BH[k2]; k2++; }
+        const tl = { nativeCol: 2, nativeColOff: Math.round((cw - w) / 2) * 9525, nativeRow: t - 1 + k2, nativeRowOff: Math.round(yPt * 12700) };
+        if (w === cw) {
+          // 横長：左右はC列の端から端まで（Excelの表示環境で列幅が多少違ってもぴったり合う）
+          let yEnd = yPt + h / PX_PER_PT, k3 = k2;
+          while (k3 < 17 && yEnd >= BH[k3]) { yEnd -= BH[k3]; k3++; }
+          ws.addImage(imgId, { tl: Object.assign(tl, { nativeColOff: 0 }), br: { nativeCol: 3, nativeColOff: 0, nativeRow: t - 1 + k3, nativeRowOff: Math.round(yEnd * 12700) }, editAs: 'oneCell' });
+        } else {
+          ws.addImage(imgId, { tl, ext: { width: w, height: h }, editAs: 'oneCell' });
+        }
       }
       if (p < pages - 1) ws.getRow(R0 + 60).addPageBreak();
     }

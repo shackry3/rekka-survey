@@ -38,6 +38,11 @@ window.SURVEY_CONFIG = {
   //   1枚あたり約150〜300KB。もっと軽くしたい場合は 1024、精細にしたい場合は 1600 など。
   image: { maxPx: 1280, quality: 0.78 },
 
+  // 写真台帳に貼る写真の大きさ（縦横比は常に元のまま）
+  //   widthCm  : 横長写真の幅。C列からはみ出す／小さすぎる場合はここを調整（例：10.2〜11.4）
+  //   columnCm : 左右中央に置くための C列幅の目安
+  photoBox: { widthCm: 10.6, columnCm: 10.9 },
+
   // 写真台帳（劣化状況写真）の所見欄：1行あたりの全角文字数と行数
   photoNote: { charsPerLine: 15, lines: 9 },
 

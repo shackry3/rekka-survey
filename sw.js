@@ -1,5 +1,5 @@
 /* オフライン用キャッシュ。アプリを更新したら CACHE_VERSION を上げる */
-const CACHE_VERSION = 'rekka-v5';
+const CACHE_VERSION = 'rekka-v7';
 const ASSETS = ['./', './index.html', './app.js', './export.js', './config.js', './manifest.webmanifest',
   './vendor/exceljs.min.js', './icons/icon-180.png', './icons/icon-192.png', './icons/icon-512.png'];
 self.addEventListener('install', e => {

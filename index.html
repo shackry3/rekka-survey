@@ -82,18 +82,19 @@ dialog .dbody{padding:16px}
 <div class="fab hidden" id="fab"><div class="inner" id="fabInner"></div></div>
 <div class="toast" id="toast"></div>
 <dialog id="dlg"><div class="dbody">
-  <div style="font-weight:700;font-size:17px;margin-bottom:6px">✓ 出力の準備ができました</div>
+  <div style="font-weight:700;font-size:17px;margin-bottom:6px" id="dlgTitle">✓ 出力の準備ができました</div>
   <div class="muted" id="dlgName" style="word-break:break-all"></div>
   <div class="row" style="margin-top:16px">
     <button class="btn ghost" id="dlgClose" style="flex:0 0 auto">閉じる</button>
     <button class="btn pri" id="dlgShare">📤 保存・共有</button>
   </div>
-  <div class="hint">共有シートで「"ファイル"に保存」やAirDropを選んでください。</div>
+  <div class="hint" id="dlgHint"></div>
 </div></dialog>
 
 <input type="file" id="camInput" accept="image/*" capture="environment" class="hidden">
 <input type="file" id="libInput" accept="image/*" multiple class="hidden">
 <input type="file" id="csvInput" accept=".csv,text/csv,text/plain" class="hidden">
+<input type="file" id="repInput" accept="image/*" class="hidden">
 <input type="file" id="bkInput" accept=".json,application/json" class="hidden">
 
 <script src="vendor/exceljs.min.js" defer></script>

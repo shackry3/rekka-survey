@@ -77,7 +77,7 @@
     CFG.sheetParts.forEach((p, i) => {
       const r = 9 + i;
       const lines = recs.filter(x => x.part === p).map(x => {
-        const where = [x.floor, x.detail].filter(Boolean).join('　');
+        const where = [x.floor, x.room, x.detail].filter(Boolean).join('　');
         const m = String(x.memo || '').split(/\n+/).map(t => t.trim().replace(/。$/, '')).filter(Boolean).join('、') || (x.phenomena || []).join('、');
         return `・${where}${where && m ? '：' : ''}${m}（写真${nos.get(x.id)}）`;
       });
@@ -132,33 +132,38 @@
         }
         const label = (k, s) => { const c = ws.getCell(t + k, 6); c.value = s; c.font = font; c.alignment = { horizontal: 'center', vertical: 'middle' }; };
         const val = (k, v, o = {}) => { const c = ws.getCell(t + k, 7); c.value = v; c.font = font; c.alignment = Object.assign({ vertical: 'middle', horizontal: 'left', indent: 0 }, o); return c; };
-        label(1, '写真　№'); label(2, '撮影日'); label(4, '階'); label(5, '部位');
+        label(1, '写真　№'); label(2, '撮影日'); label(4, '階'); label(5, '場所'); label(6, '部位');
         if (!r) continue;
         val(1, i + 1, { horizontal: 'center' });
         val(2, ymd(r.takenAt), { horizontal: 'center' }).numFmt = 'yyyy/m/d';
         val(4, r.floor || '');
-        val(5, r.detail || (r.part === '全景' ? '' : r.part || ''), { shrinkToFit: true });
+        val(5, r.room || '', { shrinkToFit: true });
+        val(6, r.detail || (r.part === '全景' ? '' : r.part || ''), { shrinkToFit: true });
         const nl = photoNoteLines(r).lines;
         const lines = nl.length > NL ? [...nl.slice(0, NL - 1), nl.slice(NL - 1).join('')] : nl;
         lines.forEach((s, k) => val(LINES0 + k, s, { shrinkToFit: k === NL - 1 && nl.length > NL }));
         // 写真：C列の幅いっぱいに配置（縦長などで枠の高さを超える場合は高さに合わせて中央配置）
-        const cw = colPx(W[2]);                                   // C列の幅（px）
+        // 写真の大きさは cm で固定し、縦横比は必ず元のまま（config.js の photoBox で調整）
+        const PB = window.SURVEY_CONFIG.photoBox, cm2px = c => c / 2.54 * 96;
+        const cw = cm2px(PB.columnCm), maxW = cm2px(PB.widthCm);
         const blockPx = BH.reduce((a, b) => a + b, 0) * PX_PER_PT;  // 枠の高さ（px）
         if (tick) tick();
-        const imgId = wb.addImage({ buffer: new Uint8Array(await r.photo.arrayBuffer()), extension: 'jpeg' });
-        let w = cw, h = Math.round(cw * r.h / r.w);
-        if (h > blockPx - 4) { h = Math.round(blockPx - 4); w = Math.round(h * r.w / r.h); }
+        let buf = null;
+        try { buf = r.broken ? null : (r.photo instanceof Blob ? await r.photo.arrayBuffer() : r.photo); } catch (e) { buf = null; }
+        if (!buf || !buf.byteLength) {        // 写真データが読めない場合は欄に注記して続行
+          r.broken = true;
+          const c = ws.getCell(t + 8, 3); c.value = '（写真データなし）'; c.font = font; c.alignment = { horizontal: 'center', vertical: 'middle' };
+          continue;
+        }
+        const imgId = wb.addImage({ buffer: new Uint8Array(buf), extension: 'jpeg' });
+        let w = maxW, h = maxW * r.h / r.w;
+        if (h > blockPx - 6) { h = blockPx - 6; w = h * r.w / r.h; }
         let yPt = (BH.reduce((a, b) => a + b, 0) - h / PX_PER_PT) / 2, k2 = 0;
         while (k2 < 17 && yPt >= BH[k2]) { yPt -= BH[k2]; k2++; }
-        const tl = { nativeCol: 2, nativeColOff: Math.round((cw - w) / 2) * 9525, nativeRow: t - 1 + k2, nativeRowOff: Math.round(yPt * 12700) };
-        if (w === cw) {
-          // 横長：左右はC列の端から端まで（Excelの表示環境で列幅が多少違ってもぴったり合う）
-          let yEnd = yPt + h / PX_PER_PT, k3 = k2;
-          while (k3 < 17 && yEnd >= BH[k3]) { yEnd -= BH[k3]; k3++; }
-          ws.addImage(imgId, { tl: Object.assign(tl, { nativeColOff: 0 }), br: { nativeCol: 3, nativeColOff: 0, nativeRow: t - 1 + k3, nativeRowOff: Math.round(yEnd * 12700) }, editAs: 'oneCell' });
-        } else {
-          ws.addImage(imgId, { tl, ext: { width: w, height: h }, editAs: 'oneCell' });
-        }
+        ws.addImage(imgId, {
+          tl: { nativeCol: 2, nativeColOff: Math.max(0, Math.round((cw - w) / 2 * 9525)), nativeRow: t - 1 + k2, nativeRowOff: Math.round(yPt * 12700) },
+          ext: { width: w, height: h }, editAs: 'oneCell'
+        });
       }
       if (p < pages - 1) ws.getRow(R0 + 60).addPageBreak();
     }
@@ -212,11 +217,11 @@
     const FONT = 'BIZ UDPゴシック';
     ws.columns = [
       { header: '施設番号', width: 9 }, { header: '施設名', width: 24 }, { header: '写真№', width: 7 },
-      { header: '部位（区分）', width: 13 }, { header: '階', width: 10 }, { header: '部位（詳細）', width: 22 },
+      { header: '部位（区分）', width: 13 }, { header: '階', width: 8 }, { header: '場所', width: 16 }, { header: '部位（詳細）', width: 22 },
       { header: '劣化現象', width: 22 }, { header: '所見メモ', width: 56 }, { header: '撮影日時', width: 16 }
     ];
     items.forEach(({ f, recs }) => recs.forEach((r, i) => ws.addRow([
-      f.no || '', facLabel(f), i + 1, r.part || '', r.floor || '', r.detail || '',
+      f.no || '', facLabel(f), i + 1, r.part || '', r.floor || '', r.room || '', r.detail || '',
       (r.phenomena || []).join('、'), r.memo || '', fmtDate(r.takenAt)])));
     ws.eachRow((row, i) => row.eachCell({ includeEmpty: true }, c => {
       c.font = { name: FONT, size: 10, bold: i === 1 };
@@ -225,7 +230,7 @@
       if (i === 1) c.fill = FILL_HEAD;
     }));
     ws.views = [{ state: 'frozen', ySplit: 1 }];
-    ws.autoFilter = { from: 'A1', to: 'I1' };
+    ws.autoFilter = { from: 'A1', to: 'J1' };
     ws.pageSetup = { paperSize: 9, orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, printTitlesRow: '1:1' };
   }
 

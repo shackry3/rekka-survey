@@ -79,7 +79,8 @@
       const lines = recs.filter(x => x.part === p).map(x => {
         const where = [x.floor, x.room, x.detail].filter(Boolean).join('　');
         const m = String(x.memo || '').split(/\n+/).map(t => t.trim().replace(/。$/, '')).filter(Boolean).join('、') || (x.phenomena || []).join('、');
-        return `・${where}${where && m ? '：' : ''}${m}（写真${nos.get(x.id)}）`;
+        const sp = x.spread ? `【${x.spread}】` : '';
+        return `・${where}${where && m ? '：' : ''}${m}${sp}（写真${nos.get(x.id)}）`;
       });
       const txt = lines.join('\n');
       const nLines = lines.reduce((a, l) => a + Math.max(1, wrapText(l, 23).length), 0);
@@ -139,9 +140,10 @@
         val(4, r.floor || '');
         val(5, r.room || '', { shrinkToFit: true });
         val(6, r.detail || (r.part === '全景' ? '' : r.part || ''), { shrinkToFit: true });
-        const nl = photoNoteLines(r).lines;
-        const lines = nl.length > NL ? [...nl.slice(0, NL - 1), nl.slice(NL - 1).join('')] : nl;
-        lines.forEach((s, k) => val(LINES0 + k, s, { shrinkToFit: k === NL - 1 && nl.length > NL }));
+        const pn = photoNoteLines(r), nl = pn.lines, C = pn.cap;
+        const lines = nl.length > C ? [...nl.slice(0, C - 1), nl.slice(C - 1).join('')] : nl;
+        lines.forEach((s, k) => val(LINES0 + k, s, { shrinkToFit: k === C - 1 && nl.length > C }));
+        if (pn.note) val(LINES0 + NL - 1, pn.note, { shrinkToFit: true });   // 範囲の注釈は所見欄の最後の行
         // 写真：C列の幅いっぱいに配置（縦長などで枠の高さを超える場合は高さに合わせて中央配置）
         // 写真の大きさは cm で固定し、縦横比は必ず元のまま（config.js の photoBox で調整）
         const PB = window.SURVEY_CONFIG.photoBox, cm2px = c => c / 2.54 * 96;
@@ -218,11 +220,11 @@
     ws.columns = [
       { header: '施設番号', width: 9 }, { header: '施設名', width: 24 }, { header: '写真№', width: 7 },
       { header: '部位（区分）', width: 13 }, { header: '階', width: 8 }, { header: '場所', width: 16 }, { header: '部位（詳細）', width: 22 },
-      { header: '劣化現象', width: 22 }, { header: '所見メモ', width: 56 }, { header: '撮影日時', width: 16 }
+      { header: '劣化現象', width: 22 }, { header: '広がり', width: 10 }, { header: '所見メモ', width: 56 }, { header: '撮影日時', width: 16 }
     ];
     items.forEach(({ f, recs }) => recs.forEach((r, i) => ws.addRow([
       f.no || '', facLabel(f), i + 1, r.part || '', r.floor || '', r.room || '', r.detail || '',
-      (r.phenomena || []).join('、'), r.memo || '', fmtDate(r.takenAt)])));
+      (r.phenomena || []).join('、'), r.spread || '', r.memo || '', fmtDate(r.takenAt)])));
     ws.eachRow((row, i) => row.eachCell({ includeEmpty: true }, c => {
       c.font = { name: FONT, size: 10, bold: i === 1 };
       c.alignment = i === 1 ? { vertical: 'middle', horizontal: 'center' } : { vertical: 'top', wrapText: true };
@@ -230,7 +232,7 @@
       if (i === 1) c.fill = FILL_HEAD;
     }));
     ws.views = [{ state: 'frozen', ySplit: 1 }];
-    ws.autoFilter = { from: 'A1', to: 'J1' };
+    ws.autoFilter = { from: 'A1', to: 'K1' };
     ws.pageSetup = { paperSize: 9, orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, printTitlesRow: '1:1' };
   }
 

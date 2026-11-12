@@ -6,18 +6,17 @@ const $ = (s, el = document) => el.querySelector(s);
 const view = $('#view');
 
 /* ------------------------------------------------------------------ DB */
-const DB_NAME = 'rekka-survey', DB_VER = 1;
+const DB_NAME = 'rekka-survey', DB_VER = 1;   // 図面は kv に 'plan:<施設ID>:<図面ID>' で保存（旧版と互換を保つためDB構造は変えない）
 let _db;
 function db() {
   if (_db) return Promise.resolve(_db);
   return new Promise((res, rej) => {
     const rq = indexedDB.open(DB_NAME, DB_VER);
     rq.onupgradeneeded = () => {
-      const d = rq.result;
-      d.createObjectStore('kv');
-      d.createObjectStore('facilities', { keyPath: 'id' });
-      const r = d.createObjectStore('records', { keyPath: 'id' });
-      r.createIndex('facilityId', 'facilityId');
+      const d = rq.result, has = n => d.objectStoreNames.contains(n);
+      if (!has('kv')) d.createObjectStore('kv');
+      if (!has('facilities')) d.createObjectStore('facilities', { keyPath: 'id' });
+      if (!has('records')) d.createObjectStore('records', { keyPath: 'id' }).createIndex('facilityId', 'facilityId');
     };
     rq.onsuccess = () => { _db = rq.result; res(_db); };
     rq.onerror = () => rej(rq.error);
@@ -41,6 +40,10 @@ const DB = {
   put: (st, v, k) => tx(st, 'readwrite', s => req(k === undefined ? s.put(v) : s.put(v, k))),
   del: (st, k) => tx(st, 'readwrite', s => req(s.delete(k))),
   byFacility: (fid) => tx('records', 'readonly', s => req(s.index('facilityId').getAll(fid))),
+  plans: (fid) => tx('kv', 'readonly', s => req(s.getAll(IDBKeyRange.bound(`plan:${fid || ''}`, `plan:${fid || ''}\uffff`)))),
+  getPlan: async (pid) => (await DB.plans()).find(p => p.id === pid),
+  putPlan: (p) => DB.put('kv', p, `plan:${p.facilityId}:${p.id}`),
+  delPlan: (p) => DB.del('kv', `plan:${p.facilityId}:${p.id}`),
   clear: async () => { for (const st of ['kv', 'facilities', 'records']) await tx(st, 'readwrite', s => req(s.clear())); }
 };
 
@@ -109,8 +112,10 @@ function wrapText(s, n) {
   if (line) out.push(line);
   return out;
 }
+const spreadNote = r => ((CFG.spreads || []).find(x => x.name === r.spread) || {}).note || '';
 function photoNoteLines(r) {
-  const { charsPerLine: N, lines: L } = CFG.photoNote;
+  const { charsPerLine: N } = CFG.photoNote;
+  const note = spreadNote(r), L = CFG.photoNote.lines - (note ? 1 : 0);   // 範囲の注釈は最後の行に入る
   let paras = String(r.memo || '').split(/\n+/).map(s => s.trim()).filter(Boolean);
   if (!paras.length && (r.phenomena || []).length) paras = [r.phenomena.join('、')];
   if (!paras.length && r.part === '全景') paras = ['全景'];
@@ -118,8 +123,32 @@ function photoNoteLines(r) {
   let lines = [];
   wrapped.forEach((w, i) => { if (i) lines.push(''); lines.push(...w); });
   if (lines.length > L) lines = wrapped.flat();          // 入りきらなければ段落間の空行を詰める
-  return { lines, over: Math.max(0, lines.length - L) };
+  return { lines, over: Math.max(0, lines.length - L), cap: L, note };
 }
+
+/* ------------------------------------------------------- 並び順（＝写真番号の順） */
+const SORTS = { time: '撮影順', part: '部位区分順', floor: '階・場所順', manual: '手動' };
+function floorKey(s) {
+  s = String(s || '');
+  if (/屋上|R階|^R/i.test(s)) return 900;
+  if (/外部|外構/.test(s)) return 950;
+  let m = s.match(/(?:B|地下)\s*(\d+)/i); if (m) return -(+m[1]);
+  m = s.match(/(\d+)\s*階|^(\d+)F?$/i); if (m) return +(m[1] || m[2]);
+  return s ? 500 : 999;
+}
+function orderRecords(f, recs) {
+  const mode = (f && f.sortMode) || 'time', pi = p => { const i = CFG.parts.indexOf(p); return i < 0 ? 99 : i; };
+  const t = (a, b) => a.takenAt - b.takenAt || a.id.localeCompare(b.id);
+  const s2 = (a, b) => String(a || '').localeCompare(String(b || ''), 'ja', { numeric: true });
+  const cmp = {
+    time: t,
+    part: (a, b) => pi(a.part) - pi(b.part) || floorKey(a.floor) - floorKey(b.floor) || s2(a.room, b.room) || t(a, b),
+    floor: (a, b) => floorKey(a.floor) - floorKey(b.floor) || s2(a.room, b.room) || pi(a.part) - pi(b.part) || t(a, b),
+    manual: (a, b) => (a.order ?? 1e9) - (b.order ?? 1e9) || t(a, b)
+  }[mode] || t;
+  return recs.slice().sort(cmp);
+}
+async function recordsOf(f) { return orderRecords(f, await DB.byFacility(f.id)); }
 
 /* ------------------------------------------------------- image handling */
 async function loadBitmap(file) {
@@ -204,14 +233,20 @@ function setChrome({ title, back, fabHTML }) {
   backBtn.classList.toggle('hidden', !back); backBtn.dataset.to = back || '';
   fab.classList.toggle('hidden', !fabHTML); fabInner.innerHTML = fabHTML || '';
 }
-async function render() {
-  releaseURLs(); window.scrollTo(0, 0);
+async function render(keep) {
+  const y = window.scrollY;
+  releaseURLs(); if (keep !== true) window.scrollTo(0, 0);
+  try { await route(); } finally { if (keep === true) window.scrollTo(0, y); }
+}
+async function route() {
   const [, a, b] = (location.hash.replace(/^#/, '') || '/').split('/');
   const id = b && decodeURIComponent(b);
   try {
     if (a === 'f') return await vFacility(id);
     if (a === 'r') return await vRecord(id);
     if (a === 'bf') return await vBarrierFree(id);
+    if (a === 'plans') return await vPlans(id);
+    if (a === 'plan') return await vPlan(id);
     if (a === 'menu') return await vMenu();
     if (a === 'newf') return await vFacilityEdit(null);
     if (a === 'ef') return await vFacilityEdit(id);
@@ -297,27 +332,33 @@ async function vFacilityEdit(id) {
     const rs = await DB.byFacility(id);
     if (!confirm(`「${facLabel(f)}」と写真 ${rs.length} 枚を削除します。元に戻せません。よろしいですか？`)) return;
     for (const r of rs) await DB.del('records', r.id);
+    for (const p of await plansOf(id)) await DB.delPlan(p);
     await DB.del('facilities', id); toast('削除しました'); go('#/');
   };
 }
 
 /* ------------------------------------------------------- facility */
-let currentFacility = null;
+let currentFacility = null, listMode = 'view';    // view | select（出力の選択）| move（手動並べ替え）
 async function vFacility(id) {
   const f = await DB.get('facilities', id);
   if (!f) return go('#/');
+  if (currentFacility !== id) listMode = 'view';
   currentFacility = id;
-  const recs = sortRecords(await DB.byFacility(id));
+  const recs = await recordsOf(f);
   const nums = photoNumbers(recs);
   const bfDone = Object.values(f.bf || {}).filter(v => v).length;
+  const plans = await plansOf(id);
+  const mode = f.sortMode || 'time';
   setChrome({
     title: facLabel(f), back: '#/',
-    fabHTML: `<button class="btn ghost" style="flex:0 0 auto;background:var(--card)" onclick="pickLibrary()">🖼 写真から</button>
-              <button class="btn acc" onclick="pickCamera()">📷 撮影して記録</button>`
+    fabHTML: listMode === 'view'
+      ? `<button class="btn ghost" style="flex:0 0 auto;background:var(--card)" onclick="pickLibrary()">🖼 写真から</button>
+         <button class="btn acc" onclick="pickCamera()">📷 撮影して記録</button>`
+      : `<button class="btn pri" id="doneMode">✓ 完了</button>`
   });
   const info = [f.builtYear && `${f.builtYear}${/^\d+$/.test(f.builtYear) ? '年度' : ''}`, f.structure, f.floorArea && `${f.floorArea}${/^[\d.,]+$/.test(f.floorArea) ? '㎡' : ''}`, f.floors && `${f.floors}${/^\d+$/.test(f.floors) ? '階' : ''}`].filter(Boolean).join('／');
-  // 部位ごとの枚数
   const byPart = {}; recs.forEach(r => byPart[r.part || '未設定'] = (byPart[r.part || '未設定'] || 0) + 1);
+  const outN = recs.filter(r => !r.exclude).length;
   view.innerHTML = `
     <div class="card">
       <div style="display:flex;align-items:center;gap:8px">
@@ -329,58 +370,95 @@ async function vFacility(id) {
         ${byPart['未設定'] ? `<span class="badge" style="background:#f6dcd6">部位未設定 ${byPart['未設定']}</span>` : ''}</div>
       <div class="row" style="margin-top:12px">
         <button class="btn ghost sm" onclick="go('#/ef/${enc(id)}')">建物情報</button>
+        <button class="btn ghost sm" onclick="go('#/plans/${enc(id)}')">図面${plans.length ? ' ' + plans.length : ''}</button>
         <button class="btn ghost sm" onclick="go('#/bf/${enc(id)}')">バリアフリー${bfDone ? ' ✓' : ''}</button>
-        <button class="btn ghost sm" id="xlsOne">Excel出力</button>
       </div>
-      ${recs.length ? `<button class="btn ghost sm wide" id="saveAll" style="margin-top:8px">📥 この建物の写真をまとめて本体に保存（${recs.reduce((a, r) => a + 1 + (r.extras || []).length, 0)}枚）</button>` : ''}
+      <div class="row" style="margin-top:8px">
+        <button class="btn pri sm" id="xlsOne">Excel出力（${outN}枚）</button>
+        ${recs.length ? `<button class="btn ghost sm" id="saveAll">📥 本体に保存</button>` : ''}
+      </div>
     </div>
-    ${recs.length ? `<div class="grid">${recs.map((r, i) => {
+    ${recs.length ? `
+    <div class="card" style="padding:10px 12px">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span class="muted">並び順</span>
+        <select id="sortSel" style="width:auto;flex:1;min-width:130px;padding:8px">${Object.entries(SORTS).map(([k, v]) => `<option value="${k}" ${k === mode ? 'selected' : ''}>${v}</option>`).join('')}</select>
+        <button class="btn ghost sm" id="mSel" style="${listMode === 'select' ? 'background:var(--pri);color:#fff' : ''}">☑ 出力の選択</button>
+        ${mode === 'manual' ? `<button class="btn ghost sm" id="mMove" style="${listMode === 'move' ? 'background:var(--pri);color:#fff' : ''}">↕ 並べ替え</button>` : ''}
+      </div>
+      <div class="hint">この並び順で写真番号を振り、Excelにもこの順で出力します。</div>
+      ${listMode === 'select' ? `<div class="row" style="margin-top:8px">
+        <button class="btn ghost sm" id="allOn">すべて出力する</button><button class="btn ghost sm" id="allOff">すべて外す</button></div>
+        <div class="hint">写真をタップすると、出力する／しないが切り替わります。</div>` : ''}
+      ${listMode === 'move' ? `<div class="hint">▲▼で1つずつ、番号ボタンで好きな位置へ移動できます。</div>` : ''}
+    </div>
+    <div class="grid">${recs.map((r, i) => {
       const nl = photoNoteLines(r);
-      return `<div class="thumb" onclick="go('#/r/${enc(r.id)}')" style="${r.exclude ? 'opacity:.5' : ''}">
+      const sel = listMode === 'select';
+      return `<div class="thumb" data-id="${esc(r.id)}" style="position:relative;${r.exclude ? 'opacity:.5' : ''}">
+        ${sel ? `<div style="position:absolute;left:8px;top:8px;width:30px;height:30px;border-radius:6px;background:${r.exclude ? '#fff' : 'var(--pri)'};border:2px solid var(--pri);color:#fff;display:flex;align-items:center;justify-content:center;font-size:20px;z-index:2">${r.exclude ? '' : '✓'}</div>` : ''}
         ${r.broken ? `<div style="aspect-ratio:4/3;display:flex;align-items:center;justify-content:center;background:#f6dcd6;color:var(--danger);font-size:13px;text-align:center;padding:8px">写真データが<br>読み込めません<br>（開いて差し替え）</div>`
-          : `<img src="${blobURL(r.thumb || r.photo)}" alt="">`}
+          : `<img src="${blobURL(r.thumb || r.photo)}" alt="" loading="lazy">`}
         <div class="cap"><b>${r.exclude ? '出力しない' : '写真' + nums.get(r.id)}</b> ${esc([r.floor, r.room].filter(Boolean).join(' '))}
-          ${(r.extras || []).length ? `<span class="badge">📷×${r.extras.length + 1}</span>` : ''}<br>
+          ${(r.extras || []).length ? `<span class="badge">📷×${r.extras.length + 1}</span>` : ''}${r.pin ? '<span class="badge">📍</span>' : ''}<br>
           ${r.part ? esc(r.part) : '<span style="color:var(--danger)">部位未入力</span>'}${r.detail ? '／' + esc(r.detail) : ''}
+          ${r.spread ? `<br><span class="badge">${esc(r.spread)}</span>` : ''}
           ${!nl.lines.length ? '<br><span style="color:var(--danger)">所見未入力</span>' : ''}
           ${nl.over ? '<br><span style="color:var(--danger)">所見が長すぎ</span>' : ''}
         </div>
+        ${listMode === 'move' ? `<div class="row" style="padding:0 6px 8px;gap:4px">
+          <button class="btn ghost sm" data-mv="-1" ${i === 0 ? 'disabled' : ''}>▲</button>
+          <button class="btn ghost sm" data-to="1">${i + 1}番目</button>
+          <button class="btn ghost sm" data-mv="1" ${i === recs.length - 1 ? 'disabled' : ''}>▼</button></div>` : ''}
       </div>`;
     }).join('')}</div>`
-      : `<div class="empty">まだ写真がありません。<br>下の「撮影して記録」で撮影してください。<br>1枚目は建物の全景がおすすめです。</div>`}`;
+      : `<div class="empty">まだ写真がありません。<br>下の「撮影して記録」で撮影するか、<br>「図面」に撮影位置を置いて撮影してください。</div>`}`;
   $('#xlsOne').onclick = () => exportExcel([id]);
-  if (recs.length) $('#saveAll').onclick = () => saveAllPhotos(f, recs);
+  if (!recs.length) return;
+  $('#saveAll').onclick = () => saveAllPhotos(f, recs);
+  const saveOrder = async list => { for (let i = 0; i < list.length; i++) if (list[i].order !== i) { list[i].order = i; await DB.put('records', list[i]); } };
+  $('#sortSel').onchange = async () => {
+    const m = $('#sortSel').value;
+    if (m === 'manual') await saveOrder(recs);            // 今の並びを手動順の出発点にする
+    f.sortMode = m; f.updatedAt = Date.now(); await DB.put('facilities', f);
+    listMode = m === 'manual' ? 'move' : (listMode === 'move' ? 'view' : listMode); render(true);
+  };
+  $('#mSel').onclick = () => { listMode = listMode === 'select' ? 'view' : 'select'; render(true); };
+  if ($('#mMove')) $('#mMove').onclick = () => { listMode = listMode === 'move' ? 'view' : 'move'; render(true); };
+  if ($('#doneMode')) $('#doneMode').onclick = () => { listMode = 'view'; render(true); };
+  if ($('#allOn')) $('#allOn').onclick = async () => { for (const r of recs) if (r.exclude) { r.exclude = false; await DB.put('records', r); } render(true); };
+  if ($('#allOff')) $('#allOff').onclick = async () => { for (const r of recs) if (!r.exclude) { r.exclude = true; await DB.put('records', r); } render(true); };
+  view.querySelectorAll('.thumb').forEach(el => {
+    const r = recs.find(x => x.id === el.dataset.id), i = recs.indexOf(r);
+    el.onclick = async ev => {
+      if (listMode === 'select') { r.exclude = !r.exclude; r.updatedAt = Date.now(); await DB.put('records', r); return render(true); }
+      if (listMode === 'move') return;
+      go(`#/r/${enc(r.id)}`);
+    };
+    el.querySelectorAll('[data-mv]').forEach(b => b.onclick = async ev => {
+      ev.stopPropagation();
+      const j = i + +b.dataset.mv; const list = recs.slice(); [list[i], list[j]] = [list[j], list[i]];
+      await saveOrder(list); render(true);
+    });
+    el.querySelectorAll('[data-to]').forEach(b => b.onclick = async ev => {
+      ev.stopPropagation();
+      const v = prompt(`何番目に移動しますか？（1〜${recs.length}）`, String(i + 1)); if (!v) return;
+      const j = Math.min(recs.length, Math.max(1, parseInt(v, 10) || i + 1)) - 1;
+      const list = recs.slice(); list.splice(i, 1); list.splice(j, 0, r);
+      await saveOrder(list); render(true);
+    });
+  });
 }
 
-/* まとめて本体に保存：iPhoneの共有画面は一度に多くの写真を渡すと開かないため、20枚ずつ保存する */
+/* まとめて本体に保存（20枚ずつ。共有処理は plans.js の shareInBatches） */
 function saveAllPhotos(f, recs) {
-  const B = 20, nums = photoNumbers(recs), list = [];
+  const nums = photoNumbers(recs), items = [];
   recs.forEach((r, i) => {
     const base = r.exclude ? `対象外${i + 1}` : nums.get(r.id);
-    if (!r.broken) list.push({ photo: r.photo, n: base });
-    (r.extras || []).forEach((x, j) => list.push({ photo: x.photo, n: `${base}-${j + 2}` }));
+    if (!r.broken) items.push({ data: asBlob(r.photo), name: photoFileName(f, base) });
+    (r.extras || []).forEach((x, j) => items.push({ data: asBlob(x.photo), name: photoFileName(f, `${base}-${j + 2}`) }));
   });
-  if (!list.length) return toast('保存できる写真がありません');
-  const batches = [];
-  for (let i = 0; i < list.length; i += B) batches.push(list.slice(i, i + B));
-  let k = 0;
-  const dlg = $('#dlg');
-  const show = () => {
-    const b = batches[k];
-    $('#dlgTitle').textContent = `写真を本体に保存（${k + 1} / ${batches.length} 回目）`;
-    $('#dlgName').textContent = `写真${b[0].n} 〜 写真${b[b.length - 1].n}（${b.length}枚）`;
-    $('#dlgHint').textContent = 'ボタンを押すと共有画面が開きます。その中の「○枚の画像を保存」を押してください。';
-    $('#dlgShare').textContent = '📥 この分を保存';
-  };
-  $('#dlgShare').onclick = async () => {
-    const files = batches[k].map(x => new File([x.photo], photoFileName(f, x.n), { type: 'image/jpeg' }));
-    const ok = await shareImages(files);
-    if (!ok) return;
-    k++;
-    if (k >= batches.length) { dlg.close(); toast('すべて保存しました'); } else show();
-  };
-  $('#dlgClose').onclick = () => dlg.close();
-  show(); dlg.showModal();
+  shareInBatches(items, '写真を本体に保存', 20);
 }
 
 /* 同じ箇所の写真を追加（台帳に使うのは1枚。記録画面で選び直せる） */
@@ -405,8 +483,9 @@ async function addSamePlace(rid, files, fromCamera) {
 
 /* ------------------------------------------------------- capture */
 let captureTarget = null;          // 「同じ箇所をもう1枚」のときの追加先レコード
-function pickCamera(target) { captureTarget = typeof target === 'string' ? target : null; $('#camInput').value = ''; $('#camInput').click(); }
-function pickLibrary(target) { captureTarget = typeof target === 'string' ? target : null; $('#libInput').value = ''; $('#libInput').click(); }
+let pendingPin = null;             // 図面でタップした撮影位置（次に撮影した写真に付ける）
+function pickCamera(target, pin) { captureTarget = typeof target === 'string' ? target : null; pendingPin = pin || null; $('#camInput').value = ''; $('#camInput').click(); }
+function pickLibrary(target) { captureTarget = typeof target === 'string' ? target : null; pendingPin = null; $('#libInput').value = ''; $('#libInput').click(); }
 window.pickCamera = pickCamera; window.pickLibrary = pickLibrary;
 $('#camInput').onchange = e => addPhotos([...e.target.files], true);
 $('#libInput').onchange = e => addPhotos([...e.target.files], false);
@@ -433,10 +512,16 @@ async function addPhotos(files, fromCamera) {
         createdAt: Date.now(), updatedAt: Date.now(),
         photo: img.photo, thumb: img.thumb, w: img.w, h: img.h
       };
+      if (pendingPin && !firstId) {          // 図面のピンから撮影した場合
+        rec.pin = { planId: pendingPin.planId, x: pendingPin.x, y: pendingPin.y };
+        if (pendingPin.floor) rec.floor = pendingPin.floor;
+        if (!existing.length) rec.part = '';
+      }
       await DB.put('records', rec);
       if (fromCamera && st.saveToDevice) originals.set(rec.id, file);
       firstId = firstId || rec.id;
     }
+    pendingPin = null;
     requestPersist();
     toast(files.length > 1 ? `${files.length} 枚を追加しました。各写真を開いて入力してください。` : '保存しました');
     if (files.length === 1) go(`#/r/${enc(firstId)}`); else render();
@@ -453,7 +538,7 @@ async function vRecord(id) {
   const r = await DB.get('records', id);
   if (!r) return go('#/');
   const f = await DB.get('facilities', r.facilityId);
-  const recs = sortRecords(await DB.byFacility(r.facilityId));
+  const recs = await recordsOf(f);
   const idx = recs.findIndex(x => x.id === id);
   const nums = photoNumbers(recs);
   currentFacility = f.id;
@@ -461,10 +546,13 @@ async function vRecord(id) {
   const label = r.exclude ? '台帳対象外' : `写真${nums.get(id)}`;
   setChrome({
     title: `${label}　${facLabel(f)}`, back,
-    fabHTML: `<button class="btn ghost" style="background:var(--card)" onclick="go('${back}')">一覧へ</button>
-              <button class="btn acc" onclick="pickCamera()">📷 次の箇所を撮影</button>`
+    fabHTML: `<button class="btn ghost" style="background:var(--card);flex:0 0 auto" onclick="go('${back}')">一覧へ</button>
+              ${r.pin ? `<button class="btn ghost" style="background:var(--card);flex:0 0 auto" onclick="go('#/plan/${enc(r.pin.planId)}')">🗺 図面へ</button>` : ''}
+              <button class="btn acc" onclick="pickCamera()">📷 次の箇所</button>`
   });
   r.extras = r.extras || [];
+  const plan = r.pin ? await DB.getPlan(r.pin.planId) : null;
+  const nPlans = (await plansOf(f.id)).length;
   const chip = (val, on) => `<button class="chip ${on ? 'on' : ''}" data-v="${esc(val)}">${esc(val)}</button>`;
   const { charsPerLine: N, lines: L } = CFG.photoNote;
   const orig = originals.get(id);
@@ -492,6 +580,8 @@ async function vRecord(id) {
       <button class="btn ghost" id="addSame">📷 同じ箇所をもう1枚</button>
       <button class="btn ghost" id="addSameLib" style="flex:0 0 auto">🖼 写真から</button>
     </div>
+    ${nPlans ? `<div class="row" style="margin-bottom:10px">
+      <button class="btn ghost" id="pinBtn">📍 ${plan ? `図面の位置：${esc(plan.floor)}（変更）` : '図面に撮影位置を付ける'}</button></div>` : ''}
     <div class="row" style="margin-bottom:12px">
       <button class="btn ghost" ${idx <= 0 ? 'disabled' : ''} id="prevR">‹ 前の箇所</button>
       <button class="btn ghost" ${idx >= recs.length - 1 ? 'disabled' : ''} id="nextR">次の箇所 ›</button>
@@ -511,6 +601,9 @@ async function vRecord(id) {
       ${rooms.length ? `<div class="chips" id="cR" style="margin-top:7px">${rooms.map(p => chip(p, r.room === p)).join('')}</div>` : ''}
       <label class="f">部位（詳細）</label>
       <input type="text" id="detail" value="${esc(r.detail)}" placeholder="例：パラペット立上り部／天井ボード">
+      <div class="chips" id="cD" style="margin-top:7px"></div>
+      <label class="f">劣化の広がり（所見欄の最後の行に注釈で入ります）</label>
+      <div class="chips" id="cS">${(CFG.spreads || []).map(p => chip(p.name, r.spread === p.name)).join('')}</div>
       <label class="f">劣化現象（複数選択可・メモ作成の補助）</label>
       <div class="chips" id="cH">${CFG.phenomena.map(p => chip(p.name, (r.phenomena || []).includes(p.name))).join('')}</div>
       <label class="f">所見メモ（劣化の状況と、それが何を意味しているか）</label>
@@ -538,6 +631,7 @@ async function vRecord(id) {
   }
   // 同じ箇所の追加撮影・台帳に使う写真の選択
   $('#addSame').onclick = () => pickCamera(id);
+  if ($('#pinBtn')) $('#pinBtn').onclick = async () => { await save(); assignRecord = id; go(`#/plans/${enc(f.id)}`); };
   $('#addSameLib').onclick = () => pickLibrary(id);
   view.querySelectorAll('[data-pick]').forEach(el => el.onclick = async () => {
     const i = +el.dataset.pick, x = r.extras[i];
@@ -568,10 +662,11 @@ async function vRecord(id) {
   };
 
   const counter = () => {
-    const nl = photoNoteLines({ memo: $('#memo').value, phenomena: r.phenomena, part: r.part });
+    const nl = photoNoteLines({ memo: $('#memo').value, phenomena: r.phenomena, part: r.part, spread: r.spread });
+    const tail = nl.note ? `＋最後の行に「${esc(nl.note)}」` : '';
     $('#cnt').innerHTML = nl.over
-      ? `<span style="color:var(--danger)">写真台帳の所見欄（${N}字×${L}行）に入りきりません：${nl.lines.length}行／${L}行</span>`
-      : `写真台帳の所見欄：${nl.lines.length}行／${L}行（1行${N}字目安）`;
+      ? `<span style="color:var(--danger)">写真台帳の所見欄（${N}字×${nl.cap}行）に入りきりません：${nl.lines.length}行／${nl.cap}行</span>${tail}`
+      : `写真台帳の所見欄：${nl.lines.length}行／${nl.cap}行（1行${N}字目安）${tail}`;
   };
   const save = async () => {
     r.floor = $('#floor').value.trim(); r.room = $('#room').value.trim(); r.detail = $('#detail').value.trim(); r.memo = $('#memo').value;
@@ -580,7 +675,6 @@ async function vRecord(id) {
     await DB.put('kv', { floor: r.floor, room: r.room, part: r.part === '全景' ? '' : r.part }, 'last_' + f.id);
   };
   const saveSoon = debounce(save, 400);
-  $('#detail').oninput = saveSoon;
   $('#memo').oninput = () => { counter(); saveSoon(); };
   $('#incl').onchange = async () => { r.exclude = !$('#incl').checked; await save(); render(); };
   const quick = (inp, box) => {
@@ -588,9 +682,22 @@ async function vRecord(id) {
     if (box) box.querySelectorAll('.chip').forEach(c => c.onclick = () => { inp.value = inp.value === c.dataset.v ? '' : c.dataset.v; inp.oninput(); });
   };
   quick($('#floor'), $('#cF')); quick($('#room'), $('#cR'));
+  // 部位（詳細）の候補：区分ごとの設定＋この建物で使った言葉
+  const drawDetails = () => {
+    const base = (CFG.details || {})[r.part] || [];
+    const used = recs.filter(x => x.part === r.part && x.detail).map(x => x.detail);
+    const list = [...new Set([...base, ...used])];
+    $('#cD').innerHTML = list.map(p => chip(p, $('#detail').value === p)).join('');
+    quick($('#detail'), $('#cD'));
+  };
+  drawDetails();
+  $('#cS').querySelectorAll('.chip').forEach(c => c.onclick = () => {
+    r.spread = r.spread === c.dataset.v ? '' : c.dataset.v;
+    $('#cS').querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x.dataset.v === r.spread)); counter(); save();
+  });
   $('#cP').querySelectorAll('.chip').forEach(c => c.onclick = () => {
     r.part = r.part === c.dataset.v ? '' : c.dataset.v;
-    $('#cP').querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x.dataset.v === r.part)); counter(); save();
+    $('#cP').querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x.dataset.v === r.part)); drawDetails(); counter(); save();
   });
   $('#cH').querySelectorAll('.chip').forEach(c => c.onclick = () => {
     const v = c.dataset.v, s = new Set(r.phenomena || []);
@@ -695,7 +802,7 @@ async function vMenu() {
       <div class="muted" style="margin-top:4px">${persisted ? '✓ ブラウザに永続保存を許可されています' : '※ ブラウザの判断でデータが消える可能性があります。こまめにバックアップしてください。'}</div>
       <button class="btn danger wide" style="margin-top:14px" id="wipe">すべてのデータを削除</button>
     </div>
-    <p class="muted" style="text-align:center">公共施設 劣化調査ノート v1.6</p>`;
+    <p class="muted" style="text-align:center">公共施設 劣化調査ノート v2.0</p>`;
   const saveP = debounce(async () => {
     await DB.put('kv', { city: $('#pCity').value.trim(), title: $('#pTitle').value.trim(), surveyor: $('#pSur').value.trim() }, 'project');
   }, 300);
@@ -750,7 +857,7 @@ async function exportExcel(facilityIds) {
     if (!facs.length) return toast('出力する建物がありません');
     await migratePhotos();
     const items = [];
-    for (const f of facs) items.push({ f, recs: sortRecords(await DB.byFacility(f.id)).filter(r => !r.exclude) });
+    for (const f of facs) items.push({ f, recs: (await recordsOf(f)).filter(r => !r.exclude) });
     const total = items.reduce((a, x) => a + x.recs.length, 0);
     const blob = await window.buildSurveyWorkbook(pj, items, n => toast(`Excelを作成中… 写真 ${n} / ${total}`, 180000));
     const label = facs.length === 1 ? `${facs[0].no || ''}${facLabel(facs[0])}` : (pj.city || '全件');
@@ -775,7 +882,9 @@ async function exportBackup() {
       for (const x of r.extras || []) extras.push(Object.assign({}, x, { photo: await blobToDataURL(asBlob(x.photo)), thumb: await blobToDataURL(asBlob(x.thumb)) }));
       records.push(Object.assign({}, r, { photo: await blobToDataURL(asBlob(r.photo)), thumb: await blobToDataURL(asBlob(r.thumb)), extras }));
     }
-    const blob = new Blob([JSON.stringify({ app: 'rekka-survey', version: 2, exportedAt: Date.now(), project: pj, facilities, records })], { type: 'application/json' });
+    const plans = [];
+    for (const p of await DB.plans()) plans.push(Object.assign({}, p, { image: await blobToDataURL(asBlob(p.image)) }));
+    const blob = new Blob([JSON.stringify({ app: 'rekka-survey', version: 3, exportedAt: Date.now(), project: pj, facilities, records, plans })], { type: 'application/json' });
     toast('書き出しの準備ができました');
     saveFile(blob, `劣化調査バックアップ_${safeName(pj.city || '')}_${stamp()}.json`);
   } catch (e) { console.error(e); toast('書き出しに失敗しました：' + e.message, 6000); }
@@ -803,7 +912,13 @@ $('#bkInput').onchange = async e => {
       await DB.put('records', Object.assign({}, r, { photo: await buf(r.photo), thumb: await buf(r.thumb), extras, broken: false }));
       cur ? ur++ : nr++;
     }
-    toast(`統合しました：建物 +${nf}、写真 +${nr}（更新 ${ur}）`, 4000); render();
+    let np = 0;
+    for (const p of data.plans || []) {
+      const cur = await DB.getPlan(p.id);
+      if (cur && (cur.updatedAt || 0) >= (p.updatedAt || 0)) continue;
+      await DB.putPlan(Object.assign({}, p, { image: await (await dataURLToBlob(p.image)).arrayBuffer() })); np++;
+    }
+    toast(`統合しました：建物 +${nf}、写真 +${nr}（更新 ${ur}）${np ? `、図面 ${np}` : ''}`, 4000); render();
   } catch (err) { console.error(err); toast('読み込みに失敗しました：' + err.message, 6000); }
 };
 

@@ -171,13 +171,18 @@ async function vPlan(pid) {
       <button class="btn ghost sm" id="zOut" style="flex:0 0 auto">－</button>
       <button class="btn ghost sm" id="zFit" style="flex:0 0 auto">全体</button>
     </div>
-    <div id="pv" style="position:relative;overflow:hidden;height:calc(100vh - 230px);min-height:320px;touch-action:none;background:#d9d6cc;border-radius:10px">
+    <div id="pv" style="position:relative;overflow:hidden;height:calc(100vh - 290px);min-height:300px;touch-action:none;background:#d9d6cc;border-radius:10px">
       <div id="pvIn" style="position:absolute;left:0;top:0;transform-origin:0 0">
         <img id="pvImg" src="${blobURL(p.image)}" style="display:block;width:${p.w}px;height:${p.h}px;max-width:none;user-select:none;-webkit-user-select:none" draggable="false">
         ${pins.map(r => `<div class="pin" data-rid="${esc(r.id)}" style="position:absolute;left:${r.pin.x * p.w}px;top:${r.pin.y * p.h}px;transform-origin:0 0">
           <div style="transform:translate(-50%,-50%);min-width:30px;height:30px;padding:0 5px;border-radius:15px;background:${r.exclude ? '#888' : '#c62828'};color:#fff;font-weight:700;font-size:15px;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4)">${r.exclude ? '×' : nums.get(r.id)}</div></div>`).join('')}
       </div>
-    </div>`;
+    </div>
+    ${assigning ? '' : `<div class="row" style="margin-top:8px">
+      <button class="btn ghost sm" id="plRename">✏ 階名変更</button>
+      <button class="btn ghost sm" id="plReplace">🔄 差し替え</button>
+      <button class="btn danger sm" id="plDelete">🗑 削除</button>
+    </div>`}`;
   const pv = $('#pv'), pin = $('#pvIn');
   let s = 1, tx = 0, ty = 0;
   const apply = () => {
@@ -237,6 +242,39 @@ async function vPlan(pid) {
   });
   if (assigning) { $('#cancelAs').onclick = () => { const rid = assignRecord; assignRecord = null; go(`#/r/${enc(rid)}`); }; return; }
   $('#placeBtn').onclick = () => { vPlan.placing = !placing; render(true); };
+  // 図面の管理
+  $('#plRename').onclick = async () => {
+    const v = prompt('階の名前', p.floor); if (v === null || !v.trim() || v.trim() === p.floor) return;
+    p.floor = v.trim(); p.updatedAt = Date.now(); await DB.putPlan(p);
+    if (confirm(`この図面に撮影位置がある写真（${pins.length}枚）の「階」も「${p.floor}」に変えますか？`))
+      for (const r of pins) { r.floor = p.floor; r.updatedAt = Date.now(); await DB.put('records', r); }
+    toast('階名を変更しました'); render(true);
+  };
+  $('#plReplace').onclick = () => {
+    const inp = $('#planInput'); inp.value = '';
+    inp.onchange = async e => {
+      const file = e.target.files[0]; if (!file) return;
+      try {
+        toast('図面を読み込み中…', 60000);
+        let page = 1; const n = await pdfPageCount(file);
+        if (n > 1) { const v = prompt(`このPDFは ${n} ページあります。何ページ目を使いますか？`, '1'); if (!v) return toast('中止しました'); page = parseInt(v, 10) || 1; }
+        const img = await planImageFromFile(file, page);
+        Object.assign(p, { image: img.buf, w: img.w, h: img.h, source: file.name, updatedAt: Date.now() });
+        await DB.putPlan(p); vPlan.view = null;
+        toast('図面を差し替えました（撮影位置はそのままの相対位置で残ります）', 4000); render();
+      } catch (err) { console.error(err); toast('図面を読み込めませんでした：' + err.message, 6000); }
+    };
+    inp.click();
+  };
+  $('#plDelete').onclick = async () => {
+    const msg = pins.length
+      ? `「${p.floor}」の図面を削除します。\nこの図面に付けた撮影位置（${pins.length}箇所）も外れます（写真と入力内容は残ります）。よろしいですか？`
+      : `「${p.floor}」の図面を削除します。よろしいですか？`;
+    if (!confirm(msg)) return;
+    for (const r of pins) { delete r.pin; r.updatedAt = Date.now(); await DB.put('records', r); }
+    await DB.delPlan(p); vPlan.view = null; vPlan.placing = false;
+    toast('図面を削除しました'); go(`#/plans/${enc(f.id)}`);
+  };
 }
 
 /* ---------- 複数ファイルを少しずつ共有（iPhoneは一度に多くを渡すと共有画面が開かない） ---------- */

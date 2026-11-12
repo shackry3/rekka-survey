@@ -802,7 +802,7 @@ async function vMenu() {
       <div class="muted" style="margin-top:4px">${persisted ? '✓ ブラウザに永続保存を許可されています' : '※ ブラウザの判断でデータが消える可能性があります。こまめにバックアップしてください。'}</div>
       <button class="btn danger wide" style="margin-top:14px" id="wipe">すべてのデータを削除</button>
     </div>
-    <p class="muted" style="text-align:center">公共施設 劣化調査ノート v2.0</p>`;
+    <p class="muted" style="text-align:center">公共施設 劣化調査ノート v2.1</p>`;
   const saveP = debounce(async () => {
     await DB.put('kv', { city: $('#pCity').value.trim(), title: $('#pTitle').value.trim(), surveyor: $('#pSur').value.trim() }, 'project');
   }, 300);
